@@ -148,7 +148,7 @@ async function route(request, env) {
 
   if (parts[0] === 'people') {
     if (method === 'GET') {
-      const rows = await env.DB.prepare('SELECT id, name FROM people WHERE user_id = ? ORDER BY name').bind(user.id).all();
+      const rows = await env.DB.prepare('SELECT id, name, hidden FROM people WHERE user_id = ? ORDER BY name').bind(user.id).all();
       return json({ people: rows.results || [] });
     }
     if (method === 'POST') {
@@ -156,6 +156,43 @@ async function route(request, env) {
       const p = await getOrCreatePerson(env, user.id, body.name);
       return json({ person: p });
     }
+    if (method === 'PATCH' && parts[1]) {
+      const body = await readJson(request);
+      await env.DB.prepare('UPDATE people SET hidden = ? WHERE user_id = ? AND id = ?').bind(body.hidden ? 1 : 0, user.id, parts[1]).run();
+      return json({ ok: true });
+    }
+  }
+
+  if (parts[0] === 'manual-charges' && method === 'POST') {
+    const body = await readJson(request);
+    const amount = Number(body.amount);
+    const description = String(body.description || '').trim();
+    if (!String(body.person || '').trim() || !description || !Number.isFinite(amount) || amount === 0) return json({ error: 'Person, description, and a non-zero amount are required.' }, 400);
+    const person = await getOrCreatePerson(env, user.id, body.person);
+    let statement = await env.DB.prepare("SELECT id FROM statements WHERE user_id = ? AND issuer = 'manual' ORDER BY id LIMIT 1").bind(user.id).first();
+    if (!statement) {
+      statement = await env.DB.prepare("INSERT INTO statements (user_id, issuer, title, notes) VALUES (?, 'manual', 'Manual charges', 'One-off charges added directly from the dashboard') RETURNING id").bind(user.id).first();
+    }
+    const order = await env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM transactions WHERE user_id = ? AND statement_id = ?').bind(user.id, statement.id).first();
+    const tx = await env.DB.prepare('INSERT INTO transactions (user_id, statement_id, transaction_date, merchant, original_description, amount, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id')
+      .bind(user.id, statement.id, body.charge_date || new Date().toISOString().slice(0, 10), description, description, amount, order.next_order).first();
+    await env.DB.prepare('INSERT INTO line_items (user_id, statement_id, transaction_id, person_id, amount, notes) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(user.id, statement.id, tx.id, person.id, amount, body.notes || null).run();
+    return json({ ok: true });
+  }
+
+  if (parts[0] === 'reset-data' && method === 'POST') {
+    const body = await readJson(request);
+    if (body.confirm !== 'RESET') return json({ error: 'Type RESET to confirm.' }, 400);
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM payments WHERE user_id = ?').bind(user.id),
+      env.DB.prepare('DELETE FROM line_items WHERE user_id = ?').bind(user.id),
+      env.DB.prepare('DELETE FROM transactions WHERE user_id = ?').bind(user.id),
+      env.DB.prepare('DELETE FROM statements WHERE user_id = ?').bind(user.id),
+      env.DB.prepare('DELETE FROM merchant_rules WHERE user_id = ?').bind(user.id),
+      env.DB.prepare('DELETE FROM people WHERE user_id = ?').bind(user.id)
+    ]);
+    return json({ ok: true });
   }
 
   if (parts[0] === 'merchant-rules') {
@@ -268,7 +305,7 @@ async function route(request, env) {
   }
 
   if (parts[0] === 'dashboard' && method === 'GET') {
-    const people = await env.DB.prepare('SELECT id, name FROM people WHERE user_id = ? ORDER BY name').bind(user.id).all();
+    const people = await env.DB.prepare('SELECT id, name, hidden FROM people WHERE user_id = ? ORDER BY name').bind(user.id).all();
     const assigned = await env.DB.prepare(`
       SELECT p.id AS person_id, COALESCE(SUM(li.amount),0) AS assigned
       FROM people p LEFT JOIN line_items li ON li.person_id = p.id AND li.user_id = p.user_id
