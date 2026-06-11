@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
-import { Upload, LayoutDashboard, FileText, Settings, Users, LogOut, Trash2, Plus, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { Upload, LayoutDashboard, FileText, Settings, Users, LogOut, Trash2, Plus, Download } from 'lucide-react';
 import './styles.css';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -281,41 +281,60 @@ function SplitEditor({ row, people, onApply }) {
 function Dashboard() {
   const [data, setData] = useState({ summary: [], detail: [], payments: [] });
   const [openPerson, setOpenPerson] = useState(null);
-  const [openStatement, setOpenStatement] = useState({});
   const [form, setForm] = useState({ person:'', amount:'', payment_date:new Date().toISOString().slice(0,10), type:'Paid', method:'Venmo', notes:'' });
+  const [resetConfirm, setResetConfirm] = useState('');
+  const [msg, setMsg] = useState('');
   async function load(){ setData(await api('/dashboard')); }
   useEffect(()=>{ load(); }, []);
+  const visiblePeople = data.summary.filter(p=>!p.hidden);
+  const hiddenPeople = data.summary.filter(p=>p.hidden);
+  const hiddenWithBalance = hiddenPeople.filter(p=>Math.abs(p.open) >= 0.005);
   async function addPayment(e){ e.preventDefault(); await api('/payments',{method:'POST',body:JSON.stringify(form)}); setForm({...form, amount:'', notes:''}); load(); }
+  async function setHidden(person, hidden){ await api('/people/'+person.id,{method:'PATCH',body:JSON.stringify({hidden})}); if (hidden && openPerson===person.id) setOpenPerson(null); load(); }
+  async function resetData(){
+    try { await api('/reset-data',{method:'POST',body:JSON.stringify({confirm:resetConfirm})}); setResetConfirm(''); setOpenPerson(null); setMsg('All saved statements, charges, people, payments, and merchant rules were deleted.'); load(); }
+    catch(e) { setMsg(e.message); }
+  }
   function exportCSV(){
     const lines = [['Person','Assigned','Paid','Splitwise','Adjustment','Open'], ...data.summary.map(r=>[r.name,r.assigned,r.paid,r.splitwise,r.adjustment,r.open])];
     downloadCSV('dashboard-summary.csv', lines);
   }
-  return <div className="page"><div className="page-head"><h2>Dashboard</h2><p>Balances are person-level: assigned line items minus payments, Splitwise transfers, and adjustments.</p></div>
-    <div className="stats">{data.summary.map(p=><div className="stat" key={p.id} onClick={()=>setOpenPerson(openPerson===p.id?null:p.id)}><div>{p.name}</div><strong>{money(p.open)}</strong><span>Assigned {money(p.assigned)} · Paid {money(p.paid)} · Splitwise {money(p.splitwise)}</span></div>)}</div>
+  return <div className="page"><div className="page-head"><h2>Dashboard</h2><p>Click a person to open their profile, review every charge, or add a one-off charge.</p></div>
+    {msg && <div className="notice">{msg}</div>}
+    {hiddenWithBalance.length > 0 && <div className="notice hidden-alert"><strong>Hidden people have an open balance:</strong>{hiddenWithBalance.map(p=><span key={p.id}>{p.name} ({money(p.open)}) <button onClick={()=>setHidden(p,false)}>Unhide</button></span>)}</div>}
+    <div className="stats">{visiblePeople.map(p=><div className={openPerson===p.id?'stat active':'stat'} key={p.id} onClick={()=>setOpenPerson(openPerson===p.id?null:p.id)}><div className="stat-head"><strong>{p.name}</strong><button onClick={e=>{e.stopPropagation();setHidden(p,true);}}>Hide</button></div><b>{money(p.open)}</b><span>Assigned {money(p.assigned)} · Paid {money(p.paid)} · Splitwise {money(p.splitwise)}</span><em>{openPerson===p.id?'Close profile':'View profile and charges'}</em></div>)}</div>
+    {!visiblePeople.length && <div className="panel muted">No visible people yet. Import a statement or unhide someone below.</div>}
+    {data.summary.map(p => openPerson===p.id && <PersonDetail key={p.id} person={p} data={data} reload={load}/>) }
     <div className="panel"><div className="toolbar"><h3>Record payment / Splitwise transfer</h3><button onClick={exportCSV}><Download size={16}/> Export summary</button></div>
       <form className="payment-form" onSubmit={addPayment}>
-        <select value={form.person} onChange={e=>setForm({...form,person:e.target.value})}><option value="">Person</option>{data.summary.map(p=><option key={p.id}>{p.name}</option>)}</select>
-        <input type="number" step="0.01" placeholder="Amount" value={form.amount} onChange={e=>setForm({...form,amount:e.target.value})}/>
-        <input type="date" value={form.payment_date} onChange={e=>setForm({...form,payment_date:e.target.value})}/>
+        <select required value={form.person} onChange={e=>setForm({...form,person:e.target.value})}><option value="">Person</option>{data.summary.map(p=><option key={p.id}>{p.name}</option>)}</select>
+        <input required type="number" step="0.01" placeholder="Amount" value={form.amount} onChange={e=>setForm({...form,amount:e.target.value})}/>
+        <input required type="date" value={form.payment_date} onChange={e=>setForm({...form,payment_date:e.target.value})}/>
         <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}><option>Paid</option><option>Moved to Splitwise</option><option>Adjustment</option></select>
         <select value={form.method} onChange={e=>setForm({...form,method:e.target.value})}><option>Venmo</option><option>Zelle</option><option>Cash</option><option>Check</option><option>Splitwise</option><option>Other</option></select>
         <input placeholder="Notes" value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/>
         <button className="primary">Add</button>
       </form>
     </div>
-    {data.summary.map(p => openPerson===p.id && <PersonDetail key={p.id} person={p} data={data} openStatement={openStatement} setOpenStatement={setOpenStatement} reload={load}/>) }
+    {hiddenPeople.length > 0 && <div className="panel"><h3>Hidden people</h3><div className="hidden-list">{hiddenPeople.map(p=><div key={p.id}><span>{p.name} · Open {money(p.open)}</span><button onClick={()=>setHidden(p,false)}>Unhide</button></div>)}</div></div>}
+    <div className="panel danger-zone"><h3>Start from scratch</h3><p>Delete all of your saved statements, charges, people, payments, and merchant rules. Your login will remain active. This cannot be undone.</p><div className="reset-row"><input value={resetConfirm} onChange={e=>setResetConfirm(e.target.value)} placeholder="Type RESET to confirm"/><button className="danger" disabled={resetConfirm!=='RESET'} onClick={resetData}>Wipe all saved data</button></div></div>
   </div>;
 }
 
-function PersonDetail({ person, data, openStatement, setOpenStatement, reload }) {
+function PersonDetail({ person, data, reload }) {
   const rows = data.detail.filter(d=>d.person_id===person.id);
   const byStatement = rows.reduce((acc,r)=>{ (acc[r.statement_id] ||= { title:r.statement_title, issuer:r.issuer, rows:[], total:0 }); acc[r.statement_id].rows.push(r); acc[r.statement_id].total += Number(r.line_amount); return acc; },{});
   const payments = data.payments.filter(p=>p.person_id===person.id);
-  return <div className="panel detail"><h3>{person.name} — Open {money(person.open)}</h3>
-    {Object.entries(byStatement).map(([sid, group]) => <div className="accordion" key={sid}>
-      <button className="acc-head" onClick={()=>setOpenStatement({...openStatement,[sid]:!openStatement[sid]})}>{openStatement[sid]?<ChevronDown/>:<ChevronRight/>}<strong>{group.title}</strong><span>{group.issuer}</span><b>{money(group.total)}</b></button>
-      {openStatement[sid] && <div className="acc-body"><table><thead><tr><th>Date</th><th>Merchant</th><th>Original</th><th>Person Amount</th><th>Full Charge</th></tr></thead><tbody>{group.rows.map((r,i)=><tr key={i}><td>{r.transaction_date}</td><td>{r.merchant}</td><td className="original">{r.original_description}</td><td>{money(r.line_amount)}</td><td>{money(r.original_amount)}</td></tr>)}</tbody></table></div>}
-    </div>)}
+  const [charge, setCharge] = useState({ description:'', amount:'', charge_date:new Date().toISOString().slice(0,10), notes:'' });
+  const [msg, setMsg] = useState('');
+  async function addCharge(e){ e.preventDefault(); try { await api('/manual-charges',{method:'POST',body:JSON.stringify({...charge,person:person.name})}); setCharge({...charge,description:'',amount:'',notes:''}); setMsg('One-off charge added.'); reload(); } catch(e) { setMsg(e.message); } }
+  return <div className="panel detail"><div className="profile-head"><div><h3>{person.name}</h3><p>Open balance: <strong>{money(person.open)}</strong></p></div><div><span>Assigned {money(person.assigned)}</span><span>Paid {money(person.paid)}</span><span>Splitwise {money(person.splitwise)}</span></div></div>
+    <h4>Charges by statement</h4>
+    {Object.entries(byStatement).length ? Object.entries(byStatement).map(([sid, group]) => <div className="accordion" key={sid}>
+      <div className="acc-head static"><strong>{group.title}</strong><span>{group.issuer}</span><b>{money(group.total)}</b></div>
+      <div className="acc-body"><table><thead><tr><th>Date</th><th>Charge</th><th>Amount owed</th><th>Full charge</th></tr></thead><tbody>{group.rows.map((r,i)=><tr key={i}><td>{r.transaction_date}</td><td>{r.merchant}<div className="original">{r.original_description}</div></td><td><strong>{money(r.line_amount)}</strong></td><td>{money(r.original_amount)}</td></tr>)}</tbody></table></div>
+    </div>) : <p className="muted">No charges assigned to this person.</p>}
+    <div className="manual-charge"><h4>Add one-off charge</h4><p className="muted">Use this for cash purchases or anything that did not come from an imported statement.</p>{msg&&<div className="notice">{msg}</div>}<form onSubmit={addCharge}><input required placeholder="Description" value={charge.description} onChange={e=>setCharge({...charge,description:e.target.value})}/><input required type="number" step="0.01" placeholder="Amount" value={charge.amount} onChange={e=>setCharge({...charge,amount:e.target.value})}/><input required type="date" value={charge.charge_date} onChange={e=>setCharge({...charge,charge_date:e.target.value})}/><input placeholder="Notes (optional)" value={charge.notes} onChange={e=>setCharge({...charge,notes:e.target.value})}/><button className="primary">Add charge</button></form></div>
     <h4>Payments / transfers</h4>{payments.length ? <table><thead><tr><th>Date</th><th>Type</th><th>Method</th><th>Amount</th><th>Notes</th><th></th></tr></thead><tbody>{payments.map(p=><tr key={p.id}><td>{p.payment_date}</td><td>{p.type}</td><td>{p.method}</td><td>{money(p.amount)}</td><td>{p.notes}</td><td><button className="danger" onClick={async()=>{await api('/payments/'+p.id,{method:'DELETE'}); reload();}}>Delete</button></td></tr>)}</tbody></table> : <p className="muted">No payments recorded.</p>}
   </div>
 }
