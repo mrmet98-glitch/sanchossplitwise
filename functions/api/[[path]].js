@@ -191,20 +191,34 @@ async function route(request, env) {
     if (method === 'POST') {
       const body = await readJson(request);
       if (!body.title || !body.issuer || !Array.isArray(body.rows)) return json({ error: 'Missing statement data.' }, 400);
+      const normalizedRows = [];
+      for (const row of body.rows) {
+        const originalAmount = Number(row.originalAmount ?? row.amount ?? 0);
+        const sourceItems = Array.isArray(row.lineItems) && row.lineItems.length ? row.lineItems : [{ person: row.person, amount: row.amount }];
+        const items = sourceItems.map(item => ({ ...item, person: String(item.person || '').trim(), amount: Number(item.amount) }));
+        if (!Number.isFinite(originalAmount) || items.some(item => !item.person || !Number.isFinite(item.amount))) {
+          return json({ error: `Every line item for ${row.merchant || 'a transaction'} needs a person and valid amount.` }, 400);
+        }
+        if (items.some(item => item.person.toLowerCase() === 'split')) {
+          return json({ error: '“Split” cannot be used as a person. Assign each split line to the person who owes it.' }, 400);
+        }
+        const uniquePeople = new Set(items.map(item => item.person.toLowerCase()));
+        if (uniquePeople.size !== items.length) return json({ error: `Each person can only appear once in the split for ${row.merchant || 'a transaction'}.` }, 400);
+        const allocated = items.reduce((sum, item) => sum + item.amount, 0);
+        if (Math.abs(originalAmount - allocated) >= 0.005) return json({ error: `The split for ${row.merchant || 'a transaction'} must equal the full charge.` }, 400);
+        normalizedRows.push({ row, originalAmount, items });
+      }
       const statement = await env.DB.prepare('INSERT INTO statements (user_id, issuer, title, period_start, period_end, notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING id')
         .bind(user.id, body.issuer, body.title.trim(), body.period_start || null, body.period_end || null, body.notes || null).first();
       const statementId = statement.id;
-      for (let i = 0; i < body.rows.length; i++) {
-        const row = body.rows[i];
+      for (let i = 0; i < normalizedRows.length; i++) {
+        const { row, originalAmount, items } = normalizedRows[i];
         const tx = await env.DB.prepare('INSERT INTO transactions (user_id, statement_id, transaction_date, merchant, original_description, amount, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id')
-          .bind(user.id, statementId, row.date || null, row.merchant || 'Unknown', row.original || row.merchant || '', Number(row.originalAmount ?? row.amount ?? 0), i).first();
-        const items = Array.isArray(row.lineItems) && row.lineItems.length ? row.lineItems : [{ person: row.person, amount: row.amount }];
+          .bind(user.id, statementId, row.date || null, row.merchant || 'Unknown', row.original || row.merchant || '', originalAmount, i).first();
         for (const item of items) {
-          if (!item.person) continue;
           const p = await getOrCreatePerson(env, user.id, item.person);
-          if (!p) continue;
           await env.DB.prepare('INSERT INTO line_items (user_id, statement_id, transaction_id, person_id, amount, notes) VALUES (?, ?, ?, ?, ?, ?)')
-            .bind(user.id, statementId, tx.id, p.id, Number(item.amount || 0), item.notes || null).run();
+            .bind(user.id, statementId, tx.id, p.id, item.amount, item.notes || null).run();
         }
       }
       return json({ id: statementId });

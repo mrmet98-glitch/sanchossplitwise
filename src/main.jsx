@@ -209,8 +209,12 @@ function UploadPage({ refreshKey }) {
     setRows(rows.map(r => {
       if (r.id !== id) return r;
       const next = { ...r, ...patch };
-      if (patch.person !== undefined && (!r.lineItems || r.lineItems.length <= 1)) next.lineItems = [{ person: patch.person, amount: next.amount }];
-      if (patch.amount !== undefined && (!r.lineItems || r.lineItems.length <= 1)) next.lineItems = [{ person: next.person, amount: Number(patch.amount) }];
+      const hasExplicitLineItems = Object.prototype.hasOwnProperty.call(patch, 'lineItems');
+      if (!hasExplicitLineItems && patch.person !== undefined && (!r.lineItems || r.lineItems.length <= 1)) next.lineItems = [{ person: patch.person, amount: next.amount }];
+      if (!hasExplicitLineItems && patch.amount !== undefined && (!r.lineItems || r.lineItems.length <= 1)) {
+        next.originalAmount = Number(patch.amount);
+        next.lineItems = [{ person: next.person, amount: Number(patch.amount) }];
+      }
       return next;
     }));
   }
@@ -238,12 +242,12 @@ function UploadPage({ refreshKey }) {
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Person</th><th>Merchant / Original</th><th>Amount</th><th>Split</th><th></th></tr></thead><tbody>
         {rows.map(r => <React.Fragment key={r.id}><tr>
           <td><input className="small" value={r.date} onChange={e=>updateRow(r.id,{date:e.target.value})}/></td>
-          <td><select value={r.person || ''} onChange={e=>updateRow(r.id,{person:e.target.value})}><option value="">Select</option>{allPeople.map(p=><option key={p}>{p}</option>)}</select></td>
+          <td>{r.lineItems?.length > 1 ? <div className="split-lines">{r.lineItems.map((item,idx)=><div key={`${item.person}-${idx}`}><span>{item.person}</span><strong>{money(item.amount)}</strong></div>)}</div> : <select value={r.person || ''} onChange={e=>updateRow(r.id,{person:e.target.value})}><option value="">Select</option>{allPeople.map(p=><option key={p}>{p}</option>)}</select>}</td>
           <td><input value={r.merchant} onChange={e=>updateRow(r.id,{merchant:e.target.value})}/><div className="original">{r.original}</div></td>
-          <td><input className="money-input" type="number" step="0.01" value={r.amount} onChange={e=>updateRow(r.id,{amount:Number(e.target.value)})}/></td>
+          <td>{r.lineItems?.length > 1 ? <strong>{money(r.originalAmount ?? r.amount)}</strong> : <input className="money-input" type="number" step="0.01" value={r.amount} onChange={e=>updateRow(r.id,{amount:Number(e.target.value)})}/>}</td>
           <td>{r.lineItems?.length > 1 ? <span className="pill">{r.lineItems.length} lines</span> : <span className="muted">Single</span>}</td>
           <td className="actions"><button onClick={()=>setSplitId(splitId===r.id?null:r.id)}>{splitId===r.id?'Close':'Split'}</button><button className="danger" onClick={()=>setRows(rows.filter(x=>x.id!==r.id))}><Trash2 size={15}/></button></td>
-        </tr>{splitId===r.id && <tr><td colSpan="6"><SplitEditor row={r} people={allPeople} onAddPerson={p=>setPeople(Array.from(new Set([...people,p])))} onApply={(lineItems)=>{updateRow(r.id,{lineItems, person: lineItems.length === 1 ? lineItems[0].person : 'Split'}); setSplitId(null);}} /></td></tr>}</React.Fragment>)}
+        </tr>{splitId===r.id && <tr><td colSpan="6"><SplitEditor row={r} people={allPeople} onApply={(lineItems)=>{updateRow(r.id,{lineItems, person: lineItems.length === 1 ? lineItems[0].person : ''}); setSplitId(null);}} /></td></tr>}</React.Fragment>)}
       </tbody></table></div></div>}
   </div>;
 }
@@ -257,16 +261,20 @@ function SplitEditor({ row, people, onApply }) {
   function toggle(p){ setSelected(selected.includes(p) ? selected.filter(x=>x!==p) : [...selected,p]); }
   function evenItems(){
     const names = selected.filter(Boolean); if (!names.length) return [];
-    const cents = Math.round(total * 100); const base = Math.trunc(cents / names.length); let rem = cents - base * names.length;
-    return names.map((p,i) => ({ person:p, amount: (base + (rem-- > 0 ? 1 : 0)) / 100 }));
+    const cents = Math.round(total * 100); const base = Math.trunc(cents / names.length); const remainder = cents - base * names.length;
+    return names.map((p,i) => ({ person:p, amount: (base + (i < Math.abs(remainder) ? Math.sign(remainder) : 0)) / 100 }));
   }
-  function apply(){ onApply(mode === 'even' ? evenItems() : custom.filter(i=>i.person)); }
+  const itemsToApply = mode === 'even' ? evenItems() : custom.filter(i=>i.person);
+  const hasDuplicatePeople = new Set(itemsToApply.map(i=>i.person.toLowerCase())).size !== itemsToApply.length;
+  const canApply = itemsToApply.length > 0 && !hasDuplicatePeople && Math.abs(total-alloc) < 0.005;
+  function apply(){ if (canApply) onApply(itemsToApply); }
   return <div className="split-editor">
     <div className="split-top"><strong>Split: {row.merchant}</strong><span>Charge total: {money(total)}</span><span>Allocated: {money(alloc)}</span><span className={Math.abs(total-alloc)<0.005?'ok':'bad'}>Difference: {money(total-alloc)}</span></div>
     <div className="tabs"><button className={mode==='even'?'active':''} onClick={()=>setMode('even')}>Even split</button><button className={mode==='custom'?'active':''} onClick={()=>{setMode('custom'); if (!custom.length) setCustom(evenItems());}}>Custom amounts</button></div>
     {mode === 'even' && <div><div className="chips">{people.map(p=><button key={p} className={selected.includes(p)?'chip selected':'chip'} onClick={()=>toggle(p)}>{p}</button>)}</div><div className="mini-table">{evenItems().map(i=><div key={i.person}><span>{i.person}</span><strong>{money(i.amount)}</strong></div>)}</div></div>}
     {mode === 'custom' && <div className="mini-table">{custom.map((i,idx)=><div key={idx}><select value={i.person} onChange={e=>setCustom(custom.map((x,j)=>j===idx?{...x,person:e.target.value}:x))}><option value="">Person</option>{people.map(p=><option key={p}>{p}</option>)}</select><input type="number" step="0.01" value={i.amount} onChange={e=>setCustom(custom.map((x,j)=>j===idx?{...x,amount:Number(e.target.value)}:x))}/><button onClick={()=>setCustom(custom.filter((_,j)=>j!==idx))}>Remove</button></div>)}<button onClick={()=>setCustom([...custom,{person:'',amount:0}])}>Add line</button></div>}
-    <div className="toolbar right"><button className="primary" onClick={apply}>Confirm split into line items</button></div>
+    {hasDuplicatePeople && <div className="bad split-warning">Each person can only appear once in a split.</div>}
+    <div className="toolbar right"><button className="primary" disabled={!canApply} onClick={apply}>Confirm split into line items</button></div>
   </div>
 }
 
